@@ -1,8 +1,12 @@
 from django.urls import path
 from .views import PlayerView, TeamView, MatchView, RegisterUserView
-from rest_framework_simplejwt.views import (
-    TokenObtainPairView,
-    TokenRefreshView,
+from rest_framework_simplejwt.views import (TokenObtainPairView,TokenRefreshView,)
+from drf_yasg.views import get_schema_view
+from drf_yasg import openapi
+
+schema_view = get_schema_view(
+    openapi.Info(title="Cricket API", default_version='v1'),
+    public=True,
 )
 
 urlpatterns = [
@@ -15,4 +19,6 @@ urlpatterns = [
     path('teams/<int:team_id>/', TeamView.as_view(), name='team-detail'),
     path('matches/', MatchView.as_view(), name='match-list'),
     path('matches/<int:match_id>/', MatchView.as_view(), name='match-detail'),
+    
+    path('swagger/', schema_view.with_ui('swagger'), name='schema-swagger-ui'),
 ]
