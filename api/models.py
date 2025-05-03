@@ -1,24 +1,19 @@
+from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.core.exceptions import ValidationError
+from django.conf import settings
 
-class CustomUser(models.Model):
+class CustomUser(AbstractUser):
     CATEGORY_CHOICES = [
         ('ADMIN', 'Admin'),
         ('ORGANISER', 'Organiser'),
         ('CAPTAIN', 'Captain'),
         ('PLAYER', 'Player'),
     ]
-    username = models.CharField(max_length=150, unique=True)
-    email = models.EmailField(unique=True)
-    password = models.CharField(max_length=128)
-    first_name = models.CharField(max_length=30, blank=True)
-    last_name = models.CharField(max_length=30, blank=True)
-    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default='PLAYER')
-    is_active = models.BooleanField(default=True)
-    is_staff = models.BooleanField(default=False)
+    category = models.CharField(max_length=10, choices=CATEGORY_CHOICES)
 
     def __str__(self):
-        return self.username
+        return f"{self.username} ({self.category})"
 
 class Team(models.Model):
     name = models.CharField(max_length=100)
@@ -36,36 +31,42 @@ class Team(models.Model):
 
     def update_points(self):
         self.points = (self.wins * 2) + self.draw
-        self.save()
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)  # Save first to ensure the instance exists
+        self.update_points()  # Recalculate points
+        super().save(update_fields=['points'])  # Save again to update points
 
 class PlayerProfile(models.Model):
-    TYPE_CHOICES = [
+    PLAYER_TYPES = [
         ('BATTER', 'Batter'),
         ('BOWLER', 'Bowler'),
         ('ALL_ROUNDER', 'All-Rounder'),
+        ('WICKET_KEEPER', 'Wicket-Keeper'),
     ]
-    user = models.OneToOneField(CustomUser, on_delete=models.CASCADE)
-    age = models.PositiveIntegerField()
-    type = models.CharField(max_length=20, choices=TYPE_CHOICES)
-    team = models.ForeignKey(Team, related_name='players', on_delete=models.SET_NULL, null=True, blank=True)
-    matches_played = models.PositiveIntegerField(default=0)
-    total_runs = models.PositiveIntegerField(default=0)
-    wickets = models.PositiveIntegerField(default=0)
+
+    user = models.OneToOneField('CustomUser', on_delete=models.CASCADE, related_name='playerprofile')
+    age = models.IntegerField()
+    type = models.CharField(max_length=20, choices=PLAYER_TYPES, default='BATTER')
+    team = models.ForeignKey(Team, related_name='players', on_delete=models.CASCADE)
+    matches_played = models.IntegerField(default=0)
+    total_runs = models.IntegerField(default=0)
+    wickets = models.IntegerField(default=0)
     is_playing = models.BooleanField(default=False)
 
-    def __str__(self):
-        return f"{self.user.username} - {self.team.name if self.team else 'No Team'}"
-
     def clean(self):
-        if self.is_playing and self.team:
-            playing_count = self.team.players.filter(is_playing=True).count()
-            if playing_count >= 11:
-                raise ValidationError("A team cannot have more than 11 players in the playing XI.")
+        if self.is_playing:
+            playing_eleven_count = PlayerProfile.objects.filter(team=self.team, is_playing=True).exclude(pk=self.pk).count()
+            if playing_eleven_count >= 11:
+                raise ValidationError("A team can only have 11 players in the playing XI.")
 
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
 
+    def __str__(self):
+        return f"{self.user.username} ({self.type})"
+    
 class Match(models.Model):
     date = models.DateField()
     venue = models.CharField(max_length=200)
@@ -79,32 +80,35 @@ class Match(models.Model):
     def save(self, *args, **kwargs):
         is_new = self._state.adding
 
-        # Revert previous stats if updating an existing match
+        # Store old match state for reversion if updating
+        old_winner = None
+        old_team1 = None
+        old_team2 = None
         if not is_new:
             try:
                 old_match = Match.objects.get(pk=self.pk)
-                # Revert team stats based on previous match result
-                if old_match.winner:
-                    old_match.winner.wins -= 1
-                    if old_match.winner == old_match.team1:
-                        old_match.team2.lost -= 1
-                    else:
-                        old_match.team1.lost -= 1
-                    old_match.winner.save()
-                else:
-                    # Previous match was a draw
-                    old_match.team1.draw -= 1
-                    old_match.team2.draw -= 1
-                    old_match.team1.save()
-                    old_match.team2.save()
-                # Ensure reverted stats are saved
-                old_match.team1.save()
-                old_match.team2.save()
+                old_winner = old_match.winner
+                old_team1 = old_match.team1
+                old_team2 = old_match.team2
             except Match.DoesNotExist:
                 pass  # Rare case: old match not found
 
-        # Save the match object
-        super().save(*args, **kwargs)
+        # Revert previous stats if updating
+        if not is_new and old_winner:
+            old_winner.wins = max(0, old_winner.wins - 1)
+            old_winner.update_points()
+            old_winner.save()
+            if old_winner == old_team1:
+                old_team2.lost -= 1
+                old_team2.save()
+            else:
+                old_team1.lost -= 1
+                old_team1.save()
+        elif not is_new and not old_winner:
+            old_team1.draw -= 1
+            old_team2.draw -= 1
+            old_team1.save()
+            old_team2.save()
 
         # Update player and team match counts only for new matches
         if is_new:
@@ -122,6 +126,7 @@ class Match(models.Model):
         # Apply new match results
         if self.winner:
             self.winner.wins += 1
+            self.winner.update_points()
             self.winner.save()
             if self.winner == self.team1:
                 self.team2.lost += 1
@@ -135,6 +140,7 @@ class Match(models.Model):
             self.team1.save()
             self.team2.save()
 
-        # Update team points
-        self.team1.update_points()
-        self.team2.update_points()
+        # Save the match object after all stats are updated
+        super().save(*args, **kwargs)           
+            
+            

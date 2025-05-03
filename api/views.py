@@ -7,6 +7,7 @@ from .models import PlayerProfile, Team, Match
 from .serializers import PlayerProfileSerializer, TeamSerializer, MatchSerializer, UserRegisterSerializer
 from .permissions import RoleEnum, role_required
 from .utils import api_response
+from django.core.exceptions import ValidationError
 
 import logging
 
@@ -57,13 +58,16 @@ class PlayerView(APIView):
                 return Response(api_response(message="Unauthorized", code=403), status=403)
             serializer = PlayerProfileSerializer(player, data=request.data, partial=True)
             if serializer.is_valid():
-                serializer.save()
+                try:
+                    serializer.save()
+                except ValidationError as ve:
+                    return Response(api_response(data=ve.message_dict, message="Validation failed", code=400), status=400)
                 return Response(api_response(data=serializer.data, message="Player updated"))
             return Response(api_response(data=serializer.errors, message="Validation failed", code=400), status=400)
         except PlayerProfile.DoesNotExist:
             return Response(api_response(message="Player not found", code=404), status=404)
         except Exception:
-            logger.exception("Error updating player")
+            logger.exception("Unexpected error while updating player")
             return Response(api_response(message="Server error", code=500), status=500)
 
     @role_required(RoleEnum.ADMIN, RoleEnum.ORGANISER, RoleEnum.CAPTAIN)
