@@ -4,7 +4,7 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
 from .models import PlayerProfile, Team, Match
-from .serializers import PlayerProfileSerializer, TeamSerializer, MatchSerializer, UserRegisterSerializer
+from .serializers import PlayerProfileSerializer, TeamSerializer, MatchSerializer, UserRegisterSerializer, CustomUserSerializer
 from .permissions import RoleEnum, role_required
 from .utils import api_response
 from django.core.exceptions import ValidationError
@@ -26,16 +26,37 @@ class PlayerView(APIView):
     def get(self, request, player_id=None):
         try:
             if player_id:
+                # Fetch the player profile
                 player = PlayerProfile.objects.get(id=player_id)
-                serializer = PlayerProfileSerializer(player)
-                return Response(api_response(data=serializer.data))
-            
+                player_serializer = PlayerProfileSerializer(player)
+
+                # Fetch the associated user
+                user_serializer = CustomUserSerializer(player.user)
+
+                # Combine both serializers' data
+                combined_data = {
+                    "user": user_serializer.data,
+                    "player_profile": player_serializer.data
+                }
+                return Response(api_response(data=combined_data))
+
+            # Fetch all player profiles
             players = PlayerProfile.objects.all().order_by('id')
             paginator = self.pagination_class()
             result_page = paginator.paginate_queryset(players, request)
-            serializer = PlayerProfileSerializer(result_page, many=True)
-            return paginator.get_paginated_response(serializer.data)
-            
+
+            # Serialize player profiles and their associated users
+            combined_data = []
+            for player in result_page:
+                player_serializer = PlayerProfileSerializer(player)
+                user_serializer = CustomUserSerializer(player.user)
+                combined_data.append({
+                    "user": user_serializer.data,
+                    "player_profile": player_serializer.data
+                })
+
+            return paginator.get_paginated_response(combined_data)
+
         except PlayerProfile.DoesNotExist:
             return Response(api_response(message="Player not found", code=404), status=404)
         except Exception as e:
@@ -53,9 +74,17 @@ class PlayerView(APIView):
     @role_required(RoleEnum.ADMIN, RoleEnum.ORGANISER, RoleEnum.CAPTAIN, RoleEnum.PLAYER)
     def put(self, request, player_id):
         try:
+            # Fetch the player profile
             player = PlayerProfile.objects.get(id=player_id)
-            if request.user.category == RoleEnum.PLAYER and player.user != request.user:
+
+            # Check if the user is authorized to update the player profile
+            if (
+                request.user.category not in [RoleEnum.ADMIN, RoleEnum.ORGANISER, RoleEnum.CAPTAIN]
+                and player.user != request.user
+            ):
                 return Response(api_response(message="Unauthorized", code=403), status=403)
+
+            # Update the player profile
             serializer = PlayerProfileSerializer(player, data=request.data, partial=True)
             if serializer.is_valid():
                 try:
@@ -64,6 +93,7 @@ class PlayerView(APIView):
                     return Response(api_response(data=ve.message_dict, message="Validation failed", code=400), status=400)
                 return Response(api_response(data=serializer.data, message="Player updated"))
             return Response(api_response(data=serializer.errors, message="Validation failed", code=400), status=400)
+
         except PlayerProfile.DoesNotExist:
             return Response(api_response(message="Player not found", code=404), status=404)
         except Exception:

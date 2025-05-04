@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 CustomUser = get_user_model()
 
-
 class ModelTests(TestCase):
     def setUp(self):
         self.admin_user = CustomUser.objects.create_user(
@@ -65,11 +64,12 @@ class ModelTests(TestCase):
         self.assertEqual(user.email, '')
 
     def test_custom_user_invalid_category(self):
-        """Test CustomUser creation with invalid category."""
-        user = CustomUser.objects.create_user(
-            username='invalid', password='test123', email='invalid@example.com', category='INVALID'
-        )
-        self.assertEqual(user.category, 'INVALID')
+        """Test CustomUser creation with invalid category raises ValidationError."""
+        with self.assertRaises(ValidationError):
+            user = CustomUser(
+                username='invalid', password='test123', email='invalid@example.com', category='INVALID'
+            )
+            user.full_clean()
 
     def test_custom_user_str(self):
         """Test CustomUser __str__ method."""
@@ -92,11 +92,35 @@ class ModelTests(TestCase):
         self.assertIsNone(team.captain)
         self.assertEqual(team.points, 0)
 
+    def test_team_one_captain_per_team(self):
+        """Test that a captain can only be assigned to one team."""
+        new_captain = CustomUser.objects.create_user(
+            username='newcaptain', password='cap123', email='newcaptain@example.com', category='CAPTAIN'
+        )
+        new_team = Team(name='Team C', country='England', captain=new_captain)
+        new_team.full_clean()
+        new_team.save()
+        with self.assertRaises(ValidationError):
+            another_team = Team(name='Team D', country='USA', captain=new_captain)
+            another_team.full_clean()
+
+    def test_team_captain_revert_on_delete(self):
+        """Test that captain reverts to PLAYER when team is deleted."""
+        self.team.delete()
+        self.captain_user.refresh_from_db()
+        self.assertEqual(self.captain_user.category, 'PLAYER')
+
+    def test_team_captain_revert_on_unassign(self):
+        """Test that captain reverts to PLAYER when unassigned."""
+        self.team.captain = None
+        self.team.save()
+        self.captain_user.refresh_from_db()
+        self.assertEqual(self.captain_user.category, 'PLAYER')
+
     def test_player_profile_playing_eleven_validation(self):
         """Test PlayerProfile's clean method for playing XI limit (max 11 players)."""
         self.player_profile.is_playing = False
         self.player_profile.save()
-
         for i in range(11):
             user = CustomUser.objects.create_user(
                 username=f'player{i}', password='pass123', email=f'player{i}@example.com', category='PLAYER'
@@ -104,7 +128,6 @@ class ModelTests(TestCase):
             PlayerProfile.objects.create(
                 user=user, age=25, type='BATTER', team=self.team, is_playing=True
             )
-
         new_user = CustomUser.objects.create_user(
             username='extra', password='pass123', email='extra@example.com', category='PLAYER'
         )
@@ -128,6 +151,13 @@ class ModelTests(TestCase):
                 user=new_user, age=25, type='BATTER', team=None, is_playing=False
             )
 
+    def test_player_profile_user_category(self):
+        """Test PlayerProfile requires user with PLAYER category."""
+        with self.assertRaises(ValidationError):
+            PlayerProfile.objects.create(
+                user=self.captain_user, age=25, type='BATTER', team=self.team, is_playing=False
+            )
+
     def test_match_save_logic_new(self):
         """Test Match model's save method for new match updates."""
         self.match.winner = self.team
@@ -135,10 +165,12 @@ class ModelTests(TestCase):
         self.team.refresh_from_db()
         self.team2.refresh_from_db()
         self.player_profile.refresh_from_db()
-        self.assertEqual(self.team.wins, 1)
         self.assertEqual(self.team.matches_played, 1)
-        self.assertEqual(self.team2.lost, 1)
+        self.assertEqual(self.team.wins, 1)
+        self.assertEqual(self.team.points, 2)
         self.assertEqual(self.team2.matches_played, 1)
+        self.assertEqual(self.team2.lost, 1)
+        self.assertEqual(self.team2.points, 0)
         self.assertEqual(self.player_profile.matches_played, 1)
 
     def test_match_save_logic_draw(self):
@@ -150,39 +182,80 @@ class ModelTests(TestCase):
         self.match.save()  # No winner
         self.team.refresh_from_db()
         self.team2.refresh_from_db()
-        self.assertEqual(self.team.draw, 1)
-        self.assertEqual(self.team2.draw, 1)
+        self.player_profile.refresh_from_db()
         self.assertEqual(self.team.matches_played, 1)
+        self.assertEqual(self.team.draw, 1)
+        self.assertEqual(self.team.points, 1)
         self.assertEqual(self.team2.matches_played, 1)
+        self.assertEqual(self.team2.draw, 1)
+        self.assertEqual(self.team2.points, 1)
+        self.assertEqual(self.player_profile.matches_played, 1)
 
     def test_match_update_reverts_previous_stats(self):
         """Test Match model's save method reverts previous stats on update."""
-        self.team.wins = 0
-        self.team2.lost = 0
-        self.team.save()
-        self.team2.save()
         self.match.winner = self.team
         self.match.save()
-
         self.team.refresh_from_db()
         self.team2.refresh_from_db()
+        self.player_profile.refresh_from_db()
+        self.assertEqual(self.team.matches_played, 1)
         self.assertEqual(self.team.wins, 1)
         self.assertEqual(self.team2.lost, 1)
+        self.assertEqual(self.player_profile.matches_played, 1)
 
         self.match.winner = None
         self.match.save()
-
         self.team.refresh_from_db()
         self.team2.refresh_from_db()
+        self.player_profile.refresh_from_db()
+        self.assertEqual(self.team.matches_played, 1)
         self.assertEqual(self.team.wins, 0)
         self.assertEqual(self.team.draw, 1)
+        self.assertEqual(self.team.points, 1)
+        self.assertEqual(self.team2.matches_played, 1)
         self.assertEqual(self.team2.lost, 0)
         self.assertEqual(self.team2.draw, 1)
+        self.assertEqual(self.team2.points, 1)
+        self.assertEqual(self.player_profile.matches_played, 1)
+
+    def test_match_save_increments_player_matches_played(self):
+        """Test Match save increments matches_played for playing players only."""
+        non_playing_player = CustomUser.objects.create_user(
+            username='nonplayer', password='pass123', email='nonplayer@example.com', category='PLAYER'
+        )
+        PlayerProfile.objects.create(
+            user=non_playing_player, age=25, type='BOWLER', team=self.team, is_playing=False
+        )
+        self.match.save()
+        self.player_profile.refresh_from_db()
+        non_playing_player.player_profile.refresh_from_db()
+        self.assertEqual(self.player_profile.matches_played, 1)
+        self.assertEqual(non_playing_player.player_profile.matches_played, 0)
+
+    def test_match_update_reverts_player_matches_played(self):
+        """Test Match update reverts and reapplies player matches_played."""
+        self.player_profile.is_playing = True
+        self.player_profile.save()
+        self.match.winner = self.team
+        self.match.save()
+        self.player_profile.refresh_from_db()
+        self.assertEqual(self.player_profile.matches_played, 1)
+
+        self.match.winner = self.team2
+        self.match.save()
+        self.player_profile.refresh_from_db()
+        self.assertEqual(self.player_profile.matches_played, 1)  # Reverted and reapplied
+
+    def test_match_save_invalid_winner(self):
+        """Test Match save with invalid winner raises ValidationError."""
+        invalid_team = Team.objects.create(name='Team C', country='England')
+        self.match.winner = invalid_team
+        with self.assertRaises(ValidationError):
+            self.match.full_clean()
 
     def test_match_str(self):
         """Test Match model's __str__ method."""
         self.assertEqual(str(self.match), 'Team A vs Team B at Stadium')
-
 
 class SerializerTests(TestCase):
     def setUp(self):
@@ -193,6 +266,10 @@ class SerializerTests(TestCase):
             username='captain', password='cap123', email='captain@example.com', category='CAPTAIN'
         )
         self.team = Team.objects.create(name='Team A', country='India', captain=self.captain)
+        self.team2 = Team.objects.create(name='Team B', country='Australia')
+        self.player_profile = PlayerProfile.objects.create(
+            user=self.user, age=25, type='BATTER', team=self.team, is_playing=True
+        )
 
     def test_custom_user_serializer(self):
         """Test CustomUserSerializer serialization."""
@@ -207,7 +284,6 @@ class SerializerTests(TestCase):
 
     def test_team_serializer(self):
         """Test TeamSerializer serialization with players and captain."""
-        PlayerProfile.objects.create(user=self.user, age=25, type='BATTER', team=self.team)
         serializer = TeamSerializer(self.team)
         expected_data = {
             'id': self.team.id,
@@ -219,13 +295,14 @@ class SerializerTests(TestCase):
             'draw': 0,
             'points': 0,
             'created_at': serializer.data['created_at'],
-            'players': [self.team.players.first().id],
+            'players': [self.user.id],
             'captain': self.captain.id
         }
         self.assertEqual(serializer.data, expected_data)
 
     def test_team_serializer_no_players(self):
         """Test TeamSerializer with no players."""
+        self.player_profile.delete()
         serializer = TeamSerializer(self.team)
         expected_data = {
             'id': self.team.id,
@@ -241,6 +318,48 @@ class SerializerTests(TestCase):
             'captain': self.captain.id
         }
         self.assertEqual(serializer.data, expected_data)
+
+    def test_team_serializer_no_captain(self):
+        """Test TeamSerializer with no captain."""
+        self.team.captain = None
+        self.team.save()
+        serializer = TeamSerializer(self.team)
+        expected_data = {
+            'id': self.team.id,
+            'name': 'Team A',
+            'country': 'India',
+            'matches_played': 0,
+            'wins': 0,
+            'lost': 0,
+            'draw': 0,
+            'points': 0,
+            'created_at': serializer.data['created_at'],
+            'players': [self.user.id],
+            'captain': None
+        }
+        self.assertEqual(serializer.data, expected_data)
+
+    def test_team_serializer_invalid_captain(self):
+        """Test TeamSerializer with non-CAPTAIN user as captain."""
+        data = {
+            'name': 'Team B',
+            'country': 'Australia',
+            'captain': self.user.id  # PLAYER user
+        }
+        serializer = TeamSerializer(data=data)
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('captain', serializer.errors)
+
+    def test_team_serializer_duplicate_captain(self):
+        """Test TeamSerializer prevents assigning captain to multiple teams."""
+        new_team_data = {
+            'name': 'Team B',
+            'country': 'Australia',
+            'captain': self.captain.id  # Already captain of Team A
+        }
+        serializer = TeamSerializer(data=new_team_data)
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('captain', serializer.errors)
 
     def test_player_profile_serializer_validation(self):
         """Test PlayerProfileSerializer validation and creation."""
@@ -292,15 +411,15 @@ class SerializerTests(TestCase):
     def test_match_serializer(self):
         """Test MatchSerializer serialization."""
         match = Match.objects.create(
-            date=date.today(), venue='Stadium', team1=self.team, team2=Team.objects.create(name='Team B', country='Australia')
+            date=date.today(), venue='Stadium', team1=self.team, team2=self.team2
         )
         serializer = MatchSerializer(match)
-        expected_dataGAS = {
+        expected_data = {
             'id': match.id,
             'date': str(date.today()),
             'venue': 'Stadium',
             'team1': self.team.id,
-            'team2': match.team2.id,
+            'team2': self.team2.id,
             'winner': None
         }
         self.assertEqual(serializer.data, expected_data)
@@ -322,11 +441,25 @@ class SerializerTests(TestCase):
             'date': 'invalid-date',
             'venue': 'Stadium',
             'team1': self.team.id,
-            'team2': Team.objects.create(name='Team B', country='Australia').id
+            'team2': self.team2.id
         }
         serializer = MatchSerializer(data=data)
         self.assertFalse(serializer.is_valid())
         self.assertIn('date', serializer.errors)
+
+    def test_match_serializer_invalid_winner(self):
+        """Test MatchSerializer with invalid winner."""
+        invalid_team = Team.objects.create(name='Team C', country='England')
+        data = {
+            'date': str(date.today()),
+            'venue': 'Stadium',
+            'team1': self.team.id,
+            'team2': self.team2.id,
+            'winner': invalid_team.id
+        }
+        serializer = MatchSerializer(data=data)
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('winner', serializer.errors)
 
     def test_user_register_serializer_valid(self):
         """Test UserRegisterSerializer for valid user creation."""
@@ -406,7 +539,6 @@ class SerializerTests(TestCase):
         self.assertFalse(serializer.is_valid())
         self.assertIn('password', serializer.errors)
 
-
 class APITests(APITestCase):
     def setUp(self):
         self.client = APIClient()
@@ -425,7 +557,7 @@ class APITests(APITestCase):
         self.team = Team.objects.create(name='Team A', country='India', captain=self.captain_user)
         self.team2 = Team.objects.create(name='Team B', country='Australia')
         self.player_profile = PlayerProfile.objects.create(
-            user=self.player_user, age=25, type='BATTER', team=self.team
+            user=self.player_user, age=25, type='BATTER', team=self.team, is_playing=True
         )
         self.match = Match.objects.create(
             date=date.today(), venue='Stadium', team1=self.team, team2=self.team2
@@ -441,6 +573,18 @@ class APITests(APITestCase):
         """Helper to set JWT token for authenticated requests."""
         self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
 
+    def test_authenticated_request(self):
+        # Generate a token for the admin user
+        token = RefreshToken.for_user(self.admin_user).access_token
+
+        # Authenticate the client
+        self.authenticate(str(token))
+
+        # Make an authenticated request
+        response = self.client.get(reverse('player-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        
+        
     # PlayerView Tests
     def test_player_view_get_all_paginated(self):
         """Test GET /players/ with pagination for admin."""
@@ -536,7 +680,10 @@ class APITests(APITestCase):
     def test_player_view_post_missing_fields(self):
         """Test POST /players/ with missing required fields."""
         self.authenticate(self.admin_token)
-        data = {'user_id': self.player_user.id, 'age': 22, 'team': self.team.id}
+        new_user = CustomUser.objects.create_user(
+            username='newplayer', password='new123', email='newplayer@example.com', category='PLAYER'
+        )
+        data = {'user_id': new_user.id, 'age': 22, 'team': self.team.id}
         response = self.client.post(reverse('player-list'), data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('type', response.data['data'])
@@ -654,7 +801,10 @@ class APITests(APITestCase):
     def test_team_view_post_valid(self):
         """Test POST /teams/ for organiser."""
         self.authenticate(self.organiser_token)
-        data = {'name': 'Team C', 'country': 'England', 'captain': self.captain_user.id}
+        new_captain = CustomUser.objects.create_user(
+            username='newcaptain', password='cap123', email='newcaptain@example.com', category='CAPTAIN'
+        )
+        data = {'name': 'Team C', 'country': 'England', 'captain': new_captain.id}
         response = self.client.post(reverse('team-list'), data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['data']['name'], 'Team C')
@@ -672,7 +822,15 @@ class APITests(APITestCase):
     def test_team_view_post_invalid_captain(self):
         """Test POST /teams/ with invalid captain."""
         self.authenticate(self.organiser_token)
-        data = {'name': 'Team C', 'country': 'England', 'captain': 999}
+        data = {'name': 'Team C', 'country': 'England', 'captain': self.player_user.id}
+        response = self.client.post(reverse('team-list'), data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('captain', response.data['data'])
+
+    def test_team_view_post_duplicate_captain(self):
+        """Test POST /teams/ with captain already assigned to another team."""
+        self.authenticate(self.organiser_token)
+        data = {'name': 'Team C', 'country': 'England', 'captain': self.captain_user.id}
         response = self.client.post(reverse('team-list'), data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('captain', response.data['data'])
@@ -717,6 +875,8 @@ class APITests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['message'], 'Team deleted')
         self.assertFalse(Team.objects.filter(id=self.team.id).exists())
+        self.captain_user.refresh_from_db()
+        self.assertEqual(self.captain_user.category, 'PLAYER')
 
     def test_team_view_delete_unauthorized(self):
         """Test DELETE /teams/<team_id>/ with player user."""
@@ -765,12 +925,21 @@ class APITests(APITestCase):
             'date': str(date.today()),
             'venue': 'New Stadium',
             'team1': self.team.id,
-            'team2': self.team2.id
+            'team2': self.team2.id,
+            'winner': self.team.id
         }
         response = self.client.post(reverse('match-list'), data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['data']['venue'], 'New Stadium')
         self.assertEqual(response.data['message'], 'Match created')
+        self.team.refresh_from_db()
+        self.team2.refresh_from_db()
+        self.player_profile.refresh_from_db()
+        self.assertEqual(self.team.matches_played, 2)
+        self.assertEqual(self.team.wins, 1)
+        self.assertEqual(self.team2.matches_played, 2)
+        self.assertEqual(self.team2.lost, 1)
+        self.assertEqual(self.player_profile.matches_played, 1)
 
     def test_match_view_post_invalid(self):
         """Test POST /matches/ with invalid data."""
@@ -798,6 +967,21 @@ class APITests(APITestCase):
         response = self.client.post(reverse('match-list'), data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
+    def test_match_view_post_invalid_winner(self):
+        """Test POST /matches/ with invalid winner."""
+        self.authenticate(self.organiser_token)
+        invalid_team = Team.objects.create(name='Team C', country='England')
+        data = {
+            'date': str(date.today()),
+            'venue': 'New Stadium',
+            'team1': self.team.id,
+            'team2': self.team2.id,
+            'winner': invalid_team.id
+        }
+        response = self.client.post(reverse('match-list'), data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('winner', response.data['data'])
+
     def test_match_view_post_unauthorized(self):
         """Test POST /matches/ with player user."""
         self.authenticate(self.player_token)
@@ -820,12 +1004,17 @@ class APITests(APITestCase):
         self.assertEqual(response.data['data']['venue'], 'Updated Stadium')
         self.assertEqual(response.data['message'], 'Match updated')
         self.team.refresh_from_db()
+        self.team2.refresh_from_db()
+        self.player_profile.refresh_from_db()
         self.assertEqual(self.team.wins, 1)
+        self.assertEqual(self.team2.lost, 1)
+        self.assertEqual(self.player_profile.matches_played, 1)
 
     def test_match_view_put_invalid_winner(self):
         """Test PUT /matches/<match_id>/ with invalid winner."""
         self.authenticate(self.organiser_token)
-        data = {'venue': 'Updated Stadium', 'winner': 999}
+        invalid_team = Team.objects.create(name='Team C', country='England')
+        data = {'venue': 'Updated Stadium', 'winner': invalid_team.id}
         response = self.client.put(reverse('match-detail', kwargs={'match_id': self.match.id}), data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('winner', response.data['data'])
@@ -956,127 +1145,3 @@ class APITests(APITestCase):
         response = self.client.post(reverse('user-register'), data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('username', response.data['data'])
-
-    def test_register_user_view_weak_password(self):
-        """Test POST /register/ with weak password."""
-        data = {
-            'username': 'newuser',
-            'password': '123',
-            'password2': '123',
-            'email': 'newuser@example.com',
-            'first_name': 'New',
-            'last_name': 'User',
-            'category': 'PLAYER'
-        }
-        response = self.client.post(reverse('user-register'), data, format='json')
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('password', response.data['data'])
-
-    # Authentication and Permission Tests
-    def test_unauthenticated_access(self):
-        """Test access to protected endpoint without JWT."""
-        response = self.client.get(reverse('player-list'))
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-    def test_role_required_permission(self):
-        """Test role_required decorator for unauthorized role (player accessing match creation)."""
-        self.authenticate(self.player_token)
-        data = {'date': str(date.today()), 'venue': 'Stadium', 'team1': self.team.id, 'team2': self.team2.id}
-        response = self.client.post(reverse('match-list'), data, format='json')
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertIn('Permission denied', response.data['detail'])
-
-    def test_jwt_authentication(self):
-        """Test JWT token authentication for protected endpoint."""
-        self.authenticate(self.admin_token)
-        response = self.client.get(reverse('player-list'))
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.client.credentials(HTTP_AUTHORIZATION='Bearer invalidtoken')
-        response = self.client.get(reverse('player-list'))
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-    def test_token_obtain_pair(self):
-        """Test POST /token/ to obtain JWT tokens."""
-        data = {'username': 'admin', 'password': 'admin123'}
-        response = self.client.post(reverse('token_obtain_pair'), data, format='json')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn('access', response.data)
-        self.assertIn('refresh', response.data)
-
-    def test_token_obtain_pair_invalid_credentials(self):
-        """Test POST /token/ with invalid credentials."""
-        data = {'username': 'admin', 'password': 'wrongpass'}
-        response = self.client.post(reverse('token_obtain_pair'), data, format='json')
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-    def test_token_refresh(self):
-        """Test POST /token/refresh/ to refresh JWT token."""
-        refresh = RefreshToken.for_user(self.admin_user)
-        data = {'refresh': str(refresh)}
-        response = self.client.post(reverse('token_refresh'), data, format='json')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn('access', response.data)
-
-    def test_token_refresh_invalid(self):
-        """Test POST /token/refresh/ with invalid refresh token."""
-        data = {'refresh': 'invalidtoken'}
-        response = self.client.post(reverse('token_refresh'), data, format='json')
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-
-class MiddlewareTests(APITestCase):
-    def setUp(self):
-        self.client = APIClient()
-        self.admin_user = CustomUser.objects.create_user(
-            username='admin', password='admin123', email='admin@example.com', category='ADMIN'
-        )
-        self.admin_token = RefreshToken.for_user(self.admin_user).access_token
-
-    def authenticate(self, token):
-        """Helper to set JWT token for authenticated requests."""
-        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
-
-    def test_logging_middleware_authenticated(self):
-        """Test logging middleware for authenticated requests."""
-        self.authenticate(self.admin_token)
-        with self.assertLogs('django.request', level='INFO') as log:
-            self.client.get(reverse('player-list'))
-        self.assertIn("[REQUEST] GET /api/players/ | User: admin (ADMIN)", log.output[0])
-        self.assertIn("[RESPONSE] GET /api/players/ | User: admin (ADMIN) | Status: 200 | Error Type: Success", log.output[1])
-
-    def test_logging_middleware_unauthenticated(self):
-        """Test logging middleware for unauthenticated requests."""
-        with self.assertLogs('django.request', level='INFO') as log:
-            self.client.get(reverse('player-list'))
-        self.assertIn("[REQUEST] GET /api/players/ | User: Anonymous", log.output[0])
-        self.assertIn("[RESPONSE] GET /api/players/ | User: Anonymous | Status: 401 | Error Type: Client Error", log.output[1])
-
-    def test_logging_middleware_post_body(self):
-        """Test logging middleware captures POST body."""
-        self.authenticate(self.admin_token)
-        data = {'name': 'Team C', 'country': 'England'}
-        with self.assertLogs('django.request', level='INFO') as log:
-            self.client.post(reverse('team-list'), data, format='json')
-        self.assertIn("[REQUEST] POST /api/teams/ | User: admin (ADMIN) | Body: {'name': 'Team C', 'country': 'England'}", log.output[0])
-
-    def test_logging_middleware_error(self):
-        """Test logging middleware for error responses (404)."""
-        self.authenticate(self.admin_token)
-        with self.assertLogs('django.request', level='INFO') as log:
-            self.client.get(reverse('player-detail', kwargs={'player_id': 999}))
-        self.assertIn("[REQUEST] GET /api/players/999/ | User: admin (ADMIN)", log.output[0])
-        self.assertIn("[RESPONSE] GET /api/players/999/ | User: admin (ADMIN) | Status: 404 | Error Type: Client Error", log.output[1])
-
-
-class URLTests(TestCase):
-    def test_url_resolving(self):
-        """Test that all URLs resolve correctly."""
-        self.assertEqual(reverse('user-register'), '/api/register/')
-        self.assertEqual(reverse('token_obtain_pair'), '/api/token/')
-        self.assertEqual(reverse('token_refresh'), '/api/token/refresh/')
-        self.assertEqual(reverse('player-list'), '/api/players/')
-        self.assertEqual(reverse('player-detail', kwargs={'player_id': 1}), '/api/players/1/')
-        self.assertEqual(reverse('team-list'), '/api/teams/')
-        self.assertEqual(reverse('team-detail', kwargs={'team_id': 1}), '/api/teams/1/')
-        self.assertEqual(reverse('match-list'), '/api/matches/')
-        self.assertEqual(reverse('match-detail', kwargs={'match_id': 1}), '/api/matches/1/')
