@@ -1294,12 +1294,6 @@ coverage report
 - Add endpoints for advanced statistics (e.g., player performance, team rankings).
 - Support API versioning (e.g., `/api/v1/`).
 
-## Contact and Support
-For issues, feature requests, or questions:
-- **Email**: support@cricketapi.example.com
-- **Repository**: `<repository_url>` (submit issues via GitHub)
-- **Documentation Updates**: Contact the development team to suggest improvements.
-
 ---
 
 **Last Updated**: May 04, 2025  
