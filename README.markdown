@@ -115,5 +115,5 @@ Please follow the [Code of Conduct](CODE_OF_CONDUCT.md) and report issues via Gi
 
 ---
 
-**Contact**: [your-email@example.com](mailto:your-email@example.com)  
-**Issues**: [GitHub Issues](https://github.com/<your-username>/cricket-backend-api/issues)
+**Contact**: [yashdivekarwork@gmail.com](mailto:yashdivekarwork@gmail.com)  
+**Issues**: [GitHub Issues](https://github.com/Yash-Divekar/cricket-backend-api/issues)
