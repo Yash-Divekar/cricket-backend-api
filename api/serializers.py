@@ -18,7 +18,13 @@ class TeamSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'country', 'matches_played', 'wins', 'lost', 'draw', 'points', 'created_at', 'players'
         ]
-
+"""class TeamSerializer(serializers.ModelSerializer):
+    players = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
+    captain = serializers.PrimaryKeyRelatedField(queryset=CustomUser.objects.all(), allow_null=True)
+    class Meta:
+        model = Team
+        fields = ['id', 'name', 'country', 'matches_played', 'wins', 'lost', 'draw', 'points', 'created_at', 'players', 'captain']"""
+        
 class PlayerProfileSerializer(serializers.ModelSerializer):
     user = CustomUserSerializer(read_only=True)
     user_id = serializers.PrimaryKeyRelatedField(
@@ -43,7 +49,11 @@ class MatchSerializer(serializers.ModelSerializer):
     class Meta:
         model = Match
         fields = ['id', 'date', 'venue', 'team1', 'team2', 'winner']
-
+        
+    def validate(self, data):
+        if data['team1'] == data['team2']:
+            raise serializers.ValidationError("Team1 and Team2 cannot be the same.")
+        return data
         
 class UserRegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=True, validators=[validate_password])

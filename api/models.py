@@ -15,6 +15,10 @@ class CustomUser(AbstractUser):
     def __str__(self):
         return f"{self.username} ({self.category})"
 
+    def clean(self):
+        if self.category not in dict(self.CATEGORY_CHOICES).keys():
+            raise ValidationError({'category': 'Invalid category.'})
+        
 class Team(models.Model):
     name = models.CharField(max_length=100)
     country = models.CharField(max_length=100)
@@ -91,7 +95,7 @@ class Match(models.Model):
                 old_team1 = old_match.team1
                 old_team2 = old_match.team2
             except Match.DoesNotExist:
-                pass  # Rare case: old match not found
+                pass  
 
         # Revert previous stats if updating
         if not is_new and old_winner:
@@ -99,14 +103,14 @@ class Match(models.Model):
             old_winner.update_points()
             old_winner.save()
             if old_winner == old_team1:
-                old_team2.lost -= 1
+                old_team2.lost = max(0, old_team2.lost - 1)
                 old_team2.save()
             else:
-                old_team1.lost -= 1
+                old_team1.lost = max(0, old_team1.lost - 1)
                 old_team1.save()
         elif not is_new and not old_winner:
-            old_team1.draw -= 1
-            old_team2.draw -= 1
+            old_team1.draw = max(0, old_team1.draw - 1)
+            old_team2.draw = max(0, old_team2.draw - 1)
             old_team1.save()
             old_team2.save()
 
@@ -141,6 +145,6 @@ class Match(models.Model):
             self.team2.save()
 
         # Save the match object after all stats are updated
-        super().save(*args, **kwargs)           
+        super().save(*args, **kwargs)        
             
             

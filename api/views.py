@@ -197,6 +197,8 @@ class MatchView(APIView):
         except Exception:
             logger.exception("Error deleting match")
             return Response(api_response(message="Server error", code=500), status=500)
+        
+        
 class RegisterUserView(APIView):
     def post(self, request):
         try:
